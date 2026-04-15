@@ -454,7 +454,7 @@ body { background: #FAF6EE; font-family: 'Source Sans 3', sans-serif; color: #2C
   <div class="sb-bottom">
     <div class="privacy-pill">
       <div class="privacy-dot"></div>
-      <div class="privacy-text"><strong>Zero Data Retention</strong>Session only. Nothing stored. No FERPA risk.</div>
+      <div class="privacy-text"><strong>Private & Secure</strong>Protected by Cloudflare Zero Trust.</div>
     </div>
   </div>
 </aside>
@@ -659,7 +659,7 @@ body { background: #FAF6EE; font-family: 'Source Sans 3', sans-serif; color: #2C
   <div class="hero">
     <div class="hero-tag">Module 2</div>
     <div class="hero-title">Teacher Evaluation Tracker</div>
-    <div class="hero-sub">Manage the full Missouri OEQ evaluation cycle — 9 teaching standards, solo & co-observations, summative forms, AI-drafted feedback. Session only. Nothing persists.</div>
+    <div class="hero-sub">Manage the full Missouri OEQ evaluation cycle — 9 teaching standards, solo & co-observations, summative forms, AI-drafted feedback. Saved automatically.</div>
     <div class="hero-actions">
       <button class="btn-hero-solid" onclick="showModal('modal-add-teacher')">+ Add Teacher</button>
       <button class="btn-hero" onclick="showModal('modal-obs-help')">Missouri Standards Guide</button>
@@ -732,7 +732,7 @@ body { background: #FAF6EE; font-family: 'Source Sans 3', sans-serif; color: #2C
   <div class="hero">
     <div class="hero-tag">Module 4</div>
     <div class="hero-title">My Leadership Growth Tracker</div>
-    <div class="hero-sub">Track development against Missouri Leadership Standards, log evidence from daily work, and build your leadership portfolio. Entirely private — session only.</div>
+    <div class="hero-sub">Track development against Missouri Leadership Standards, log evidence from daily work, and build your leadership portfolio. Entirely private — saved automatically.</div>
     <div class="hero-actions">
       <button class="btn-hero-solid" onclick="showModal('modal-add-evidence')">+ Log Evidence</button>
       <button class="btn-hero" onclick="generateGrowthPlan()">Generate Growth Plan Draft</button>
@@ -1216,7 +1216,7 @@ Everything stays private — this conversation isn't stored anywhere.</div>
   <div class="hero">
     <div class="hero-tag">Daily Notes</div>
     <div class="hero-title">Daily Notes & Summary</div>
-    <div class="hero-sub">Capture observations, meetings, follow-ups, and wins throughout the day. Stored on this device only — auto-wipes after 24 hours. Hit Summarize at the bottom to generate your end-of-day report.</div>
+    <div class="hero-sub">Capture observations, meetings, follow-ups, and wins throughout the day. Saved automatically. Hit Summarize at the bottom to generate your end-of-day report.</div>
   </div>
 
   <!-- Date + stats row -->
@@ -1266,7 +1266,7 @@ Everything stays private — this conversation isn't stored anywhere.</div>
 <div class="panel" id="panel-privacy">
   <div class="hero">
     <div class="hero-tag">Data Protection</div>
-    <div class="hero-title">Privacy & Zero Data Retention</div>
+    <div class="hero-title">Privacy & Data</div>
     <div class="hero-sub">Built for zero liability — not by policy, but by architecture. Here's exactly what that means.</div>
   </div>
   <div class="grid2 mb16">
@@ -1279,7 +1279,7 @@ Everything stays private — this conversation isn't stored anywhere.</div>
   </div>
   <div class="ai-box" style="margin-top:0">
     <strong>30-second explanation for administrators:</strong><br>
-    "This tool is a browser-based smart notepad. It helps me analyze data and draft documents, but it stores nothing. The moment I close the tab, everything is gone — no database, no server history, no retained records. It's the same as using a PDF reader — nothing persists unless I explicitly save and send it through official channels."
+    "This tool is a private administrative workspace. Notes, records, and AI conversations are stored securely in Cloudflare's infrastructure — accessible only to you through Zero Trust authentication. Nothing is shared with your district, administration, or any third party unless you explicitly choose to send it through official channels."
   </div>
 </div>
 
@@ -2384,6 +2384,47 @@ function nav(id, el) {
 
 // ─────────────────────────────────────────────
 // CONFIG
+
+// ═══════════════════════════════════════════════════════
+// KV STORAGE LAYER — syncs to Cloudflare KV via Worker
+// Falls back to localStorage if Worker is unavailable
+// ═══════════════════════════════════════════════════════
+const KV_WORKER = 'https://kylee-ap-proxy.eduadmin.workers.dev';
+const KV_USER   = 'aubrey';
+
+async function kvGet(key) {
+  try {
+    const res = await fetch(`${KV_WORKER}/data/${KV_USER}/get/${encodeURIComponent(key)}`);
+    if (!res.ok) throw new Error('kv get failed');
+    const d = await res.json();
+    return d.value;           // null if key not found
+  } catch(e) {
+    return localStorage.getItem(key);   // fallback
+  }
+}
+
+async function kvSet(key, value) {
+  const strVal = typeof value === 'string' ? value : JSON.stringify(value);
+  // optimistic local write first so UI doesn't wait
+  try { localStorage.setItem(key, strVal); } catch(e) {}
+  try {
+    await fetch(`${KV_WORKER}/data/${KV_USER}/set`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value: strVal })
+    });
+  } catch(e) { /* silently keep localStorage copy */ }
+}
+
+async function kvDelete(key) {
+  try { localStorage.removeItem(key); } catch(e) {}
+  try {
+    await fetch(`${KV_WORKER}/data/${KV_USER}/delete/${encodeURIComponent(key)}`, {
+      method: 'DELETE'
+    });
+  } catch(e) {}
+}
+
 // ─────────────────────────────────────────────
 function saveConfig() {
   config.school = document.getElementById('cfg-school').value;
@@ -2394,7 +2435,7 @@ function saveConfig() {
   config.worker = document.getElementById('cfg-worker').value.trim();
   config.year = document.getElementById('cfg-year').value;
   config.name = document.getElementById('cfg-name').value;
-  try { localStorage.setItem('aubrey_config', JSON.stringify(config)); } catch(e){}
+  kvSet('aubrey_config', config);
   document.getElementById('chip-school').textContent = config.school || '—';
   document.getElementById('chip-year').textContent = config.year || '2025–26';
   // Update sidebar name live
@@ -2405,9 +2446,9 @@ function saveConfig() {
   showToast('Settings saved ✓ — they\'ll reload automatically next time');
 }
 
-function loadConfig() {
+async function loadConfig() {
   try {
-    const saved = localStorage.getItem('aubrey_config');
+    const saved = await kvGet('aubrey_config');
     if (saved) {
       config = { ...config, ...JSON.parse(saved) };
       document.getElementById('cfg-school').value = config.school || '';
@@ -2523,31 +2564,18 @@ ELA Essential Elements provide alternate grade-level standards with 5 Linkage Le
 function getDailySummaryKey() {
   return 'aubrey_daily_' + new Date().toISOString().slice(0,10);
 }
-function loadDailySummary() {
+async function loadDailySummary() {
   try {
-    // Auto-wipe entries older than 24hrs
-    const now = Date.now();
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith('aubrey_daily_')) {
-        const dateStr = k.replace('aubrey_daily_','');
-        const entryDate = new Date(dateStr).getTime();
-        if (now - entryDate > 24 * 60 * 60 * 1000) {
-          localStorage.removeItem(k);
-          i--;
-        }
-      }
-    }
-    const saved = localStorage.getItem(getDailySummaryKey());
+    const saved = await kvGet(getDailySummaryKey());
     return saved ? JSON.parse(saved) : { date: new Date().toISOString().slice(0,10), notes: [], generated: null, timestamp: Date.now() };
   } catch(e) { return { date: new Date().toISOString().slice(0,10), notes: [], generated: null, timestamp: Date.now() }; }
 }
 function saveDailySummary(data) {
-  try { localStorage.setItem(getDailySummaryKey(), JSON.stringify({ ...data, timestamp: Date.now() })); } catch(e) {}
+  kvSet(getDailySummaryKey(), { ...data, timestamp: Date.now() });
 }
-function addDailyNote(note) {
+async function addDailyNote(note) {
   if (!note.trim()) return;
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   data.notes.push({ text: note, time: new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) });
   saveDailySummary(data);
   renderDailyWidget();
@@ -2558,7 +2586,7 @@ function addDailyNote(note) {
 }
 function clearDailySummary() {
   if (!confirm('Clear today\'s summary notes?')) return;
-  localStorage.removeItem(getDailySummaryKey());
+  kvDelete(getDailySummaryKey());
   renderDailyWidget();
   updateNotesBadge();
   loadPlannerEvents();
@@ -2594,7 +2622,7 @@ function renderDailyWidget() {
               </div>`).join('')}
           </div>` : '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">No notes yet today. Add observations, follow-ups, or reminders above.</div>'}
         ${data.generated ? `<div class="ai-box" style="margin-top:12px"><div style="white-space:pre-wrap;font-size:12px;line-height:1.6">${data.generated}</div></div>` : ''}
-        <div style="margin-top:8px;font-size:10px;color:var(--muted)">🔒 Stored on this device only · No student names · Auto-deletes after 24 hours</div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted)">🔒 Saved to your private account · Accessible only to you</div>
       </div>
     </div>`;
 }
@@ -3040,6 +3068,7 @@ function addTeacher() {
     overallRating: null,
   };
   teachers.push(teacher);
+  kvSet('evaluations', teachers);
   document.getElementById('at-name').value = '';
   document.getElementById('at-subject').value = '';
   closeModal('modal-add-teacher');
@@ -3482,6 +3511,7 @@ function addCoachingCycle() {
     status: 'Active',
   };
   coachingCycles.push(cycle);
+  kvSet('coaching', coachingCycles);
   closeModal('modal-new-cycle');
   document.getElementById('nc-teacher').value = '';
   document.getElementById('nc-focus').value = '';
@@ -4009,6 +4039,7 @@ function logIncident() {
 
   const incident = { id: Date.now(), code, grade, date, time, type, location, antecedent, response, staff, severity, parentContact, iep, notes };
   incidents.push(incident);
+  kvSet('behavior', incidents);
 
   // Reset form
   ['beh-code','beh-antecedent','beh-response','beh-staff','beh-notes'].forEach(id => document.getElementById(id).value = '');
@@ -4406,7 +4437,7 @@ function removeNoteByIdx(idx) {
 
 function clearDailyNotes() {
   if (!confirm('Clear all notes for today?')) return;
-  localStorage.removeItem(getDailySummaryKey());
+  kvDelete(getDailySummaryKey());
   renderNotesPanelList();
   renderDailyWidget();
   updateNotesBadge();
@@ -4485,14 +4516,14 @@ const EV_LABELS = {
   pd:'PD', observation:'Observation', parent:'Parent', student:'Student Support'
 };
 
-function loadPlannerEvents() {
+async function loadPlannerEvents() {
   try {
-    const saved = localStorage.getItem(PLANNER_KEY);
+    const saved = await kvGet(PLANNER_KEY);
     plannerEvents = saved ? JSON.parse(saved) : [];
   } catch(e) { plannerEvents = []; }
 }
 function savePlannerEvents() {
-  try { localStorage.setItem(PLANNER_KEY, JSON.stringify(plannerEvents)); } catch(e) {}
+  kvSet(PLANNER_KEY, plannerEvents);
 }
 
 function saveEvent() {
