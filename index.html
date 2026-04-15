@@ -2441,8 +2441,6 @@ function saveConfig() {
   // Update sidebar name live
   const sbName = document.getElementById('sb-name-el');
   if (sbName && config.name) sbName.textContent = config.name;
-  const sbInitials = document.getElementById('sb-initials-el');
-  if (sbInitials && config.name) sbInitials.textContent = config.name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
   showToast('Settings saved ✓ — they\'ll reload automatically next time');
 }
 
@@ -2464,8 +2462,6 @@ async function loadConfig() {
       // Update sidebar name
       const sbName = document.getElementById('sb-name-el');
       if (sbName && config.name) sbName.textContent = config.name;
-      const sbInitials = document.getElementById('sb-initials-el');
-      if (sbInitials && config.name) sbInitials.textContent = config.name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
     }
   } catch(e){}
 }
