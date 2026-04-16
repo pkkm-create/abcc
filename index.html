@@ -2479,7 +2479,7 @@ async function callAI(systemPrompt, userMessage, targetEl) {
     const res = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5-20251001', max_tokens: 1024, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] })
+      body: JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 1024, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] })
     });
     const data = await res.json();
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
@@ -3401,7 +3401,7 @@ async function generateSummative() {
       const res = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-5-20251001', max_tokens: 1024, system: AI_SYSTEM, messages: [{ role: 'user', content: prompt }] })
+        body: JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 1024, system: AI_SYSTEM, messages: [{ role: 'user', content: prompt }] })
       });
       const data = await res.json();
       const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').replace(/```json|```/g,'').trim();
@@ -3884,7 +3884,7 @@ async function sendChat() {
     const res = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5-20251001', max_tokens: 1024, system: CHAT_SYSTEM, messages: chatHistory.slice(-12) })
+      body: JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 1024, system: CHAT_SYSTEM, messages: chatHistory.slice(-12) })
     });
     const data = await res.json();
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
