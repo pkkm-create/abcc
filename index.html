@@ -3894,7 +3894,7 @@ async function sendChat() {
       chatHistory.push({ role: 'assistant', content: text });
       appendChatMsg('ai', text);
     } else {
-      appendChatMsg('ai', '⚠️ Something went wrong. Check your Worker URL in School Setup.');
+      appendChatMsg('ai', '⚠️ ' + (data.error?.message || data.error?.type || JSON.stringify(data)));
     }
   } catch(e) {
     document.getElementById(typingId)?.remove();
