@@ -1500,6 +1500,23 @@ let config = { school:'', district:'', principal:'', mascot:'', assessment:'iRea
 let teachers = [];
 let evidenceLog = [];
 let coachingCycles = [];
+let moduleDataLoad = null;   // one shared load of evaluations/coaching/evidence per visit
+function loadModuleData() {
+  if (!moduleDataLoad) moduleDataLoad = (async () => {
+    const read = async key => {
+      try { const v = await kvGet(key); const a = v ? JSON.parse(v) : []; return Array.isArray(a) ? a : []; }
+      catch(e) { return []; }
+    };
+    [teachers, coachingCycles, evidenceLog] = await Promise.all([read('evaluations'), read('coaching'), read('evidence')]);
+    renderRoster();
+    renderCoachingCycles();
+    renderEvidenceLog();
+    renderPrincipalStandards();
+    updateBadge('badge-eval', teachers.length);
+    updateDashboard();
+  })();
+  return moduleDataLoad;
+}
 let activeTeacher = null;
 let sessionObs = {};
 
@@ -2389,7 +2406,8 @@ function nav(id, el) {
 // KV STORAGE LAYER — syncs to Cloudflare KV via Worker
 // Falls back to localStorage if Worker is unavailable
 // ═══════════════════════════════════════════════════════
-const KV_WORKER = 'https://kylee-ap-proxy.eduadmin.workers.dev';
+// Same-site API: <site>/api/* is behind this site's Cloudflare Access login
+const KV_WORKER = '/api';
 const KV_USER   = 'aubrey';
 
 async function kvGet(key) {
@@ -2397,7 +2415,8 @@ async function kvGet(key) {
     const res = await fetch(`${KV_WORKER}/data/${KV_USER}/get/${encodeURIComponent(key)}`);
     if (!res.ok) throw new Error('kv get failed');
     const d = await res.json();
-    return d.value;           // null if key not found
+    // Nothing on the server yet: use the copy saved on this device, if any
+    return d.value != null ? d.value : localStorage.getItem(key);
   } catch(e) {
     return localStorage.getItem(key);   // fallback
   }
@@ -2408,12 +2427,16 @@ async function kvSet(key, value) {
   // optimistic local write first so UI doesn't wait
   try { localStorage.setItem(key, strVal); } catch(e) {}
   try {
-    await fetch(`${KV_WORKER}/data/${KV_USER}/set`, {
+    const res = await fetch(`${KV_WORKER}/data/${KV_USER}/set`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key, value: strVal })
     });
-  } catch(e) { /* silently keep localStorage copy */ }
+    if (!res.ok) throw new Error('kv set failed');
+  } catch(e) {
+    // localStorage copy is kept; let the user know it didn't sync
+    showToast('Saved on this device only (sync unavailable)');
+  }
 }
 
 async function kvDelete(key) {
@@ -2476,7 +2499,7 @@ async function callAI(systemPrompt, userMessage, targetEl) {
   }
   if (targetEl) targetEl.innerHTML = '<div class="ai-box"><span class="spinner"></span>Generating...</div>';
   try {
-    const res = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
+    const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemPrompt, messages: [{ role: 'user', content: userMessage }] })
@@ -2649,17 +2672,35 @@ ELA Essential Elements provide alternate grade-level standards with 5 Linkage Le
 // ─────────────────────────────────────────────
 // 24HR DAILY SUMMARY (anonymous, device-only)
 // ─────────────────────────────────────────────
+function todayLocal() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
 function getDailySummaryKey() {
-  return 'aubrey_daily_' + new Date().toISOString().slice(0,10);
+  return 'aubrey_daily_' + todayLocal();
+}
+let dailyCache = null;   // { key, data } for today, so reads after a save see the new note
+function emptyDailySummary() {
+  return { date: todayLocal(), notes: [], generated: null, timestamp: Date.now() };
 }
 async function loadDailySummary() {
+  const key = getDailySummaryKey();
+  if (dailyCache && dailyCache.key === key) return dailyCache.data;
+  let data = null;
   try {
-    const saved = await kvGet(getDailySummaryKey());
-    return saved ? JSON.parse(saved) : { date: new Date().toISOString().slice(0,10), notes: [], generated: null, timestamp: Date.now() };
-  } catch(e) { return { date: new Date().toISOString().slice(0,10), notes: [], generated: null, timestamp: Date.now() }; }
+    const saved = await kvGet(key);
+    data = saved ? JSON.parse(saved) : null;
+  } catch(e) {}
+  if (!data || !Array.isArray(data.notes)) data = emptyDailySummary();
+  if (dailyCache && dailyCache.key === key) return dailyCache.data;   // another call finished first
+  dailyCache = { key, data };
+  return data;
 }
 function saveDailySummary(data) {
-  kvSet(getDailySummaryKey(), { ...data, timestamp: Date.now() });
+  data.timestamp = Date.now();
+  const key = getDailySummaryKey();
+  dailyCache = { key, data };
+  return kvSet(key, data);
 }
 async function addDailyNote(note) {
   if (!note.trim()) return;
@@ -2672,18 +2713,19 @@ async function addDailyNote(note) {
   showToast('Note added ✓'); updateNotesBadge();
   loadPlannerEvents();
 }
-function clearDailySummary() {
+async function clearDailySummary() {
   if (!confirm('Clear today\'s summary notes?')) return;
-  kvDelete(getDailySummaryKey());
+  dailyCache = { key: getDailySummaryKey(), data: emptyDailySummary() };
+  await kvDelete(getDailySummaryKey());
   renderDailyWidget();
   updateNotesBadge();
   loadPlannerEvents();
   showToast('Today\'s summary cleared');
 }
-function renderDailyWidget() {
+async function renderDailyWidget() {
   const el = document.getElementById('daily-summary-widget');
   if (!el) return;
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   const timeLeft = Math.max(0, Math.floor((24 * 60 * 60 * 1000 - (Date.now() - (data.timestamp || Date.now()))) / (60 * 60 * 1000)));
   el.innerHTML = `
     <div class="card">
@@ -2714,8 +2756,8 @@ function renderDailyWidget() {
       </div>
     </div>`;
 }
-function removeDailyNote(idx) {
-  const data = loadDailySummary();
+async function removeDailyNote(idx) {
+  const data = await loadDailySummary();
   data.notes.splice(idx, 1);
   saveDailySummary(data);
   renderDailyWidget();
@@ -2723,7 +2765,7 @@ function removeDailyNote(idx) {
   loadPlannerEvents();
 }
 async function generateDailySummaryAI() {
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   if (!data.notes.length) { showToast('Add some notes first'); return; }
   const el = document.getElementById('daily-summary-widget').querySelector('.ai-box') || (() => {
     const d = document.createElement('div'); d.className = 'ai-box'; d.style.marginTop = '12px';
@@ -3140,7 +3182,8 @@ Provide: 1) Cross-data alignment — where IC and iReady data tell the same stor
 // ─────────────────────────────────────────────
 // MODULE 2: EVAL
 // ─────────────────────────────────────────────
-function addTeacher() {
+async function addTeacher() {
+  await loadModuleData();
   const name = document.getElementById('at-name').value.trim();
   if (!name) { showToast('Enter teacher name'); return; }
   const teacher = {
@@ -3218,6 +3261,7 @@ function saveObservation() {
   const checkedStds = [...document.querySelectorAll('.obs-std-check:checked')].map(c => parseInt(c.value));
 
   activeTeacher.observations.push({ date, duration, notes, standards: checkedStds, timestamp: Date.now() });
+  kvSet('evaluations', teachers);
   closeModal('modal-observation');
   document.getElementById('obs-notes').value = '';
   showToast(`Observation saved for ${activeTeacher.name} ✓`);
@@ -3490,7 +3534,7 @@ async function generateSummative() {
   
   if (config.worker) {
     try {
-      const res = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: AI_SYSTEM, messages: [{ role: 'user', content: prompt }] })
@@ -3585,7 +3629,8 @@ function downloadSummativePDF(tid, teacherName) {
 // ─────────────────────────────────────────────
 // MODULE 3: COACHING
 // ─────────────────────────────────────────────
-function addCoachingCycle() {
+async function addCoachingCycle() {
+  await loadModuleData();
   const teacher = document.getElementById('nc-teacher').value.trim();
   if (!teacher) { showToast('Enter teacher description'); return; }
   const cycle = {
@@ -3646,7 +3691,7 @@ async function coachingAI(cid) {
 
 function c_obs(cid) {
   const c = coachingCycles.find(x => x.id === cid);
-  if (c && c.obsCompleted < c.obsCount) { c.obsCompleted++; renderCoachingCycles(); showToast('Observation logged ✓'); }
+  if (c && c.obsCompleted < c.obsCount) { c.obsCompleted++; kvSet('coaching', coachingCycles); renderCoachingCycles(); showToast('Observation logged ✓'); }
 }
 
 function findStrategy() {
@@ -3686,7 +3731,8 @@ async function generateEmail() {
 // ─────────────────────────────────────────────
 // MODULE 4: GROWTH
 // ─────────────────────────────────────────────
-function logEvidence() {
+async function logEvidence() {
+  await loadModuleData();
   const desc = document.getElementById('ev-desc').value.trim();
   if (!desc) { showToast('Describe what you did'); return; }
   const item = {
@@ -3698,6 +3744,7 @@ function logEvidence() {
     date: document.getElementById('ev-date').value || new Date().toISOString().split('T')[0],
   };
   evidenceLog.push(item);
+  kvSet('evidence', evidenceLog);
   document.getElementById('ev-desc').value = '';
   closeModal('modal-add-evidence');
   renderEvidenceLog();
@@ -3822,7 +3869,7 @@ function showStdDetail(code) {
 // ─────────────────────────────────────────────
 // DASHBOARD UPDATE
 // ─────────────────────────────────────────────
-function updateDashboard() {
+async function updateDashboard() {
   // Tile counts
   const bEl = document.getElementById('ds-behaviors');
   const eEl = document.getElementById('ds-evals');
@@ -3830,7 +3877,7 @@ function updateDashboard() {
   const evEl = document.getElementById('ds-evidence');
   if (bEl) bEl.textContent = incidents.length;
   if (eEl) eEl.textContent = teachers.length;
-  const nd = loadDailySummary();
+  const nd = await loadDailySummary();
   if (nEl) nEl.textContent = nd.notes.length;
   if (evEl) evEl.textContent = evidenceLog.length;
 
@@ -3973,7 +4020,7 @@ async function sendChat() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
   try {
-    const res = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
+    const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: CHAT_SYSTEM, messages: chatHistory.slice(-12) })
@@ -4028,6 +4075,16 @@ function autoResize(el) {
 // MODULE 7: BEHAVIOR & INTERVENTION TRACKER
 // ─────────────────────────────────────────────
 let incidents = [];
+// Behavior records include student codes and IEP flags, so they stay on this
+// device only and are never sent to the server (see Privacy & Data).
+const BEHAVIOR_KEY = 'behavior';
+function saveIncidents() {
+  try { localStorage.setItem(BEHAVIOR_KEY, JSON.stringify(incidents)); } catch(e) {}
+}
+function loadIncidents() {
+  try { incidents = JSON.parse(localStorage.getItem(BEHAVIOR_KEY) || '[]'); } catch(e) { incidents = []; }
+  if (!Array.isArray(incidents)) incidents = [];
+}
 
 const BEHAVIOR_SYSTEM = `You are an expert in Missouri Schoolwide Positive Behavior Support (MO SW-PBS) Tier 1, Tier 2, and Tier 3 behavior intervention systems, working as an AI coaching partner for an Administrator at a PreK-5 elementary school in Northwest R-I School District, Dittmer, Missouri.
 
@@ -4129,7 +4186,7 @@ function logIncident() {
 
   const incident = { id: Date.now(), code, grade, date, time, type, location, antecedent, response, staff, severity, parentContact, iep, notes };
   incidents.push(incident);
-  kvSet('behavior', incidents);
+  saveIncidents();
 
   // Reset form
   ['beh-code','beh-antecedent','beh-response','beh-staff','beh-notes'].forEach(id => document.getElementById(id).value = '');
@@ -4182,6 +4239,7 @@ function renderIncidentLog() {
 
 function deleteIncident(id) {
   incidents = incidents.filter(i => i.id !== id);
+  saveIncidents();
   renderIncidentLog();
   updateBehaviorStats();
   updateBadge('badge-behavior', incidents.length);
@@ -4192,6 +4250,7 @@ function clearBehaviorLog() {
   if (!incidents.length) return;
   if (!confirm('Clear all incidents from this session?')) return;
   incidents = [];
+  saveIncidents();
   renderIncidentLog();
   updateBehaviorStats();
   updateBadge('badge-behavior', 0);
@@ -4419,6 +4478,12 @@ window.addEventListener('DOMContentLoaded', () => {
   renderDailyWidget();
   updateNotesBadge();
   loadPlannerEvents();
+  loadIncidents();
+  renderIncidentLog();
+  updateBehaviorStats();
+  updateBadge('badge-behavior', incidents.length);
+  syncMobBehaviorBadge(incidents.length);
+  loadModuleData();
 });
 
 
@@ -4433,11 +4498,11 @@ function selectNoteCategory(el) {
   selectedNoteCategory = el.dataset.cat;
 }
 
-function addDailyNoteFromPanel() {
+async function addDailyNoteFromPanel() {
   const input = document.getElementById('notes-input');
   const text = input?.value.trim();
   if (!text) { showToast('Enter a note first'); return; }
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   data.notes.push({
     text,
     category: selectedNoteCategory,
@@ -4455,13 +4520,13 @@ function addDailyNoteFromPanel() {
   showToast('Note added ✓');
 }
 
-function updateNotesBadge() {
-  const data = loadDailySummary();
+async function updateNotesBadge() {
+  const data = await loadDailySummary();
   const badge = document.getElementById('badge-notes');
   if (badge) badge.textContent = data.notes.length || '';
 }
 
-function renderNotesPanel() {
+async function renderNotesPanel() {
   // Update date display
   const dateEl = document.getElementById('notes-date-display');
   if (dateEl) {
@@ -4469,7 +4534,7 @@ function renderNotesPanel() {
     dateEl.textContent = d.toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', year:'numeric'});
   }
   // Update timer
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   const timerEl = document.getElementById('notes-timer-display');
   if (timerEl) {
     const hoursLeft = Math.max(0, Math.floor((24*60*60*1000 - (Date.now() - (data.timestamp||Date.now()))) / (60*60*1000)));
@@ -4484,10 +4549,10 @@ function renderNotesPanel() {
   }
 }
 
-function renderNotesPanelList() {
+async function renderNotesPanelList() {
   const el = document.getElementById('notes-list-panel');
   if (!el) return;
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   if (!data.notes.length) {
     el.innerHTML = '<div style="color:var(--muted);font-size:12.5px;text-align:center;padding:32px;border:1.5px dashed var(--border);border-radius:12px">No notes yet today.<br><span style="font-size:11px">Use the form above to capture observations, meetings, and follow-ups.</span></div>';
     return;
@@ -4513,8 +4578,8 @@ function renderNotesPanelList() {
   </div>`;
 }
 
-function removeNoteByIdx(idx) {
-  const data = loadDailySummary();
+async function removeNoteByIdx(idx) {
+  const data = await loadDailySummary();
   data.notes.splice(idx, 1);
   saveDailySummary(data);
   renderNotesPanelList();
@@ -4525,9 +4590,10 @@ function removeNoteByIdx(idx) {
   loadPlannerEvents();
 }
 
-function clearDailyNotes() {
+async function clearDailyNotes() {
   if (!confirm('Clear all notes for today?')) return;
-  kvDelete(getDailySummaryKey());
+  dailyCache = { key: getDailySummaryKey(), data: emptyDailySummary() };
+  await kvDelete(getDailySummaryKey());
   renderNotesPanelList();
   renderDailyWidget();
   updateNotesBadge();
@@ -4540,7 +4606,7 @@ function clearDailyNotes() {
 }
 
 async function generateFullDailySummary() {
-  const data = loadDailySummary();
+  const data = await loadDailySummary();
   if (!data.notes.length) { showToast('Add some notes first'); return; }
   const btn = document.getElementById('summarize-btn');
   const el = document.getElementById('daily-summary-output');
@@ -4606,17 +4672,23 @@ const EV_LABELS = {
   pd:'PD', observation:'Observation', parent:'Parent', student:'Student Support'
 };
 
-async function loadPlannerEvents() {
-  try {
-    const saved = await kvGet(PLANNER_KEY);
-    plannerEvents = saved ? JSON.parse(saved) : [];
-  } catch(e) { plannerEvents = []; }
+let plannerLoad = null;   // one shared load per page visit
+function loadPlannerEvents() {
+  if (!plannerLoad) plannerLoad = (async () => {
+    try {
+      const saved = await kvGet(PLANNER_KEY);
+      plannerEvents = saved ? JSON.parse(saved) : [];
+    } catch(e) { plannerEvents = []; }
+    // Events arrived after the planner may have drawn empty; redraw it
+    if (document.getElementById('panel-planner')?.classList.contains('active')) renderPlanner();
+  })();
+  return plannerLoad;
 }
 function savePlannerEvents() {
   kvSet(PLANNER_KEY, plannerEvents);
 }
 
-function saveEvent() {
+async function saveEvent() {
   const title = document.getElementById('ev-title').value.trim();
   const date = document.getElementById('ev-plan-date').value;
   if (!title || !date) { showToast('Title and date are required'); return; }
@@ -4630,7 +4702,7 @@ function saveEvent() {
     notes: document.getElementById('ev-notes').value.trim(),
     repeat: document.getElementById('ev-repeat').value,
   };
-  loadPlannerEvents();
+  await loadPlannerEvents();
   plannerEvents.push(ev);
   savePlannerEvents();
   closeModal('modal-add-event');
@@ -4641,8 +4713,8 @@ function saveEvent() {
   showToast('Event saved ✓');
 }
 
-function deleteEvent(id) {
-  loadPlannerEvents();
+async function deleteEvent(id) {
+  await loadPlannerEvents();
   plannerEvents = plannerEvents.filter(e => e.id !== id);
   savePlannerEvents();
   closeModal('modal-event-detail');
@@ -4929,7 +5001,7 @@ async function handlePlannerUpload(file) {
       });
       const mediaType = file.type || 'image/jpeg';
 
-      const response = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
+      const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({
@@ -4965,7 +5037,7 @@ async function handlePlannerUpload(file) {
     }
 
     // Send to AI
-    const response = await fetch('https://kylee-ap-proxy.eduadmin.workers.dev', {
+    const response = await fetch('/api/chat', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
@@ -5030,13 +5102,13 @@ function showImportPreview(events, previewEl) {
   previewEl.querySelector('.btn').onclick = () => confirmImport(events);
 }
 
-function confirmImport(events) {
+async function confirmImport(events) {
   const checkboxes = document.querySelectorAll('[id^="imp-ev-"]');
   const toImport = events.filter((e,i) => {
     const cb = document.getElementById(`imp-ev-${i}`);
     return cb ? cb.checked : true;
   });
-  loadPlannerEvents();
+  await loadPlannerEvents();
   toImport.forEach(e => {
     plannerEvents.push({...e, id: Date.now() + Math.random()});
   });
